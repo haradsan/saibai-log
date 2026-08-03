@@ -97,8 +97,12 @@ const plantingById = (id) => M.plantings.find(p => p.id === id);
 
 function daysFromSowing(p, dateStr) {
   if (!p.sownOn) return null;
-  const d = Math.floor((new Date(dateStr || Date.now()) - new Date(p.sownOn)) / 86400000);
-  return d >= 0 ? d : null;
+  const [y, m, dd] = p.sownOn.split('-').map(Number);
+  const sown = new Date(y, m - 1, dd);
+  const t = dateStr ? new Date(dateStr) : new Date();
+  const target = new Date(t.getFullYear(), t.getMonth(), t.getDate());
+  const diff = Math.round((target - sown) / 86400000);
+  return diff >= 0 ? diff : null;
 }
 function fmtDate(iso) {
   const d = new Date(iso);
@@ -278,6 +282,10 @@ const inputState = { photos: [], plantingId: null, type: '観察', tags: new Set
 
 async function renderInput() {
   const recent = await plantingsByRecentUse();
+  if (inputPrefill && !recent.some(p => p.id === inputPrefill)) {
+    const p = plantingById(inputPrefill);
+    if (p) recent.unshift(p);
+  }
   if (recent.length === 0) {
     app.innerHTML = `<h1>記録する</h1><div class="empty">先に栽培単位を追加してください。</div>
       <button class="primary" id="btn-goto-add">栽培単位を追加する</button>`;
