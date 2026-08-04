@@ -1,4 +1,4 @@
-const CACHE = 'saibai-v1';
+const CACHE = 'saibai-v2';
 const ASSETS = ['./', './index.html', './style.css', './app.js', './manifest.webmanifest', './icon-192.png', './icon-512.png'];
 
 self.addEventListener('install', (e) => {
@@ -13,8 +13,10 @@ self.addEventListener('activate', (e) => {
 });
 
 // network-first for the app shell so updates arrive; cache fallback for offline
+// GAS等のクロスオリジンGETはキャッシュ対象外（リダイレクト応答のcache.putが失敗するため）
 self.addEventListener('fetch', (e) => {
   if (e.request.method !== 'GET') return;
+  if (new URL(e.request.url).origin !== location.origin) return;
   e.respondWith(
     fetch(e.request).then(res => {
       const copy = res.clone();

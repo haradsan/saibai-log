@@ -54,23 +54,78 @@ const dbByIndex = (store, idx, val) => new Promise((resolve, reject) => {
 const uid = () => (crypto.randomUUID ? crypto.randomUUID() : Date.now() + '-' + Math.random().toString(36).slice(2));
 const now = () => new Date().toISOString();
 
-/* ================= seed ================= */
+/* ================= seed =================
+   固定IDでシードする（複数端末で同期したとき同一マスタとして扱うため） */
 async function seedIfNeeded() {
   const seeded = await dbGet('settings', 'seeded');
-  if (seeded) return;
-  const y = new Date().getFullYear();
-  const season = { id: uid(), name: `${y}シーズン`, startDate: `${y}-01-01`, endDate: null };
-  await dbPut('seasons', season);
-  await dbPut('settings', { key: 'currentSeasonId', value: season.id });
-  const tomato = { id: uid(), name: 'トマト', trackIndividually: true };
-  const ensai = { id: uid(), name: 'エンサイ', trackIndividually: false };
-  const molo = { id: uid(), name: 'モロヘイヤ', trackIndividually: false };
-  for (const c of [tomato, ensai, molo]) await dbPut('crops', c);
-  await dbPut('varieties', { id: uid(), cropId: tomato.id, name: 'ピンキー', source: '購入' });
-  for (const name of ['engawa', 'ガレージ', '2階']) {
-    await dbPut('locations', { id: uid(), name, orientation: '', sunHours: null, roofed: false, notes: '' });
+  if (!seeded) {
+    const y = new Date().getFullYear();
+    const t = now();
+    await dbPut('seasons', { id: `seed-season-${y}`, name: `${y}シーズン`, startDate: `${y}-01-01`, endDate: null, updatedAt: t, dirty: 1 });
+    await dbPut('settings', { key: 'currentSeasonId', value: `seed-season-${y}` });
+    await dbPut('crops', { id: 'seed-crop-tomato', name: 'トマト', trackIndividually: true, updatedAt: t, dirty: 1 });
+    await dbPut('crops', { id: 'seed-crop-ensai', name: 'エンサイ', trackIndividually: false, updatedAt: t, dirty: 1 });
+    await dbPut('crops', { id: 'seed-crop-moroheiya', name: 'モロヘイヤ', trackIndividually: false, updatedAt: t, dirty: 1 });
+    await dbPut('varieties', { id: 'seed-var-pinky', cropId: 'seed-crop-tomato', name: 'ピンキー', source: '購入', updatedAt: t, dirty: 1 });
+    const locIds = { 'engawa': 'seed-loc-engawa', 'ガレージ': 'seed-loc-garage', '2階': 'seed-loc-2f' };
+    for (const [name, id] of Object.entries(locIds)) {
+      await dbPut('locations', { id, name, orientation: '', sunHours: null, roofed: false, notes: '', updatedAt: t, dirty: 1 });
+    }
+    await dbPut('settings', { key: 'seeded', value: true });
   }
-  await dbPut('settings', { key: 'seeded', value: true });
+  await migrateSeedIds();
+}
+
+/* v1.0でランダムIDでシードされた端末を固定IDへ移行する（1回だけ実行） */
+async function migrateSeedIds() {
+  if (await dbGet('settings', 'fixedSeedIds')) return;
+  const idMap = {};
+  const nameMaps = [
+    ['crops', { 'トマト': 'seed-crop-tomato', 'エンサイ': 'seed-crop-ensai', 'モロヘイヤ': 'seed-crop-moroheiya' }],
+    ['locations', { 'engawa': 'seed-loc-engawa', 'ガレージ': 'seed-loc-garage', '2階': 'seed-loc-2f' }],
+  ];
+  for (const [store, nameMap] of nameMaps) {
+    for (const obj of await dbAll(store)) {
+      const fixed = nameMap[obj.name];
+      if (fixed && obj.id !== fixed && !(await dbGet(store, fixed))) {
+        idMap[obj.id] = fixed;
+        await dbDel(store, obj.id);
+        await dbPut(store, { ...obj, id: fixed, updatedAt: obj.updatedAt || now(), dirty: 1 });
+      }
+    }
+  }
+  for (const v of await dbAll('varieties')) {
+    const nv = { ...v };
+    let changed = false;
+    if (idMap[nv.cropId]) { nv.cropId = idMap[nv.cropId]; changed = true; }
+    if (nv.name === 'ピンキー' && nv.id !== 'seed-var-pinky' && !(await dbGet('varieties', 'seed-var-pinky'))) {
+      idMap[nv.id] = 'seed-var-pinky';
+      await dbDel('varieties', nv.id);
+      nv.id = 'seed-var-pinky';
+      changed = true;
+    }
+    if (changed) await dbPut('varieties', { ...nv, updatedAt: nv.updatedAt || now(), dirty: 1 });
+  }
+  for (const s of await dbAll('seasons')) {
+    const m = /^(\d{4})シーズン$/.exec(s.name);
+    const fixed = m && `seed-season-${m[1]}`;
+    if (fixed && s.id !== fixed && !(await dbGet('seasons', fixed))) {
+      idMap[s.id] = fixed;
+      await dbDel('seasons', s.id);
+      await dbPut('seasons', { ...s, id: fixed, updatedAt: s.updatedAt || now(), dirty: 1 });
+    }
+  }
+  for (const p of await dbAll('plantings')) {
+    const np = { ...p };
+    let changed = false;
+    for (const k of ['varietyId', 'locationId', 'seasonId', 'parentPlantingId']) {
+      if (np[k] && idMap[np[k]]) { np[k] = idMap[np[k]]; changed = true; }
+    }
+    if (changed) await dbPut('plantings', { ...np, updatedAt: now(), dirty: 1 });
+  }
+  const cs = await dbGet('settings', 'currentSeasonId');
+  if (cs && idMap[cs.value]) await dbPut('settings', { key: 'currentSeasonId', value: idMap[cs.value] });
+  await dbPut('settings', { key: 'fixedSeedIds', value: true });
 }
 
 /* ================= state / helpers ================= */
@@ -87,8 +142,18 @@ const PRESET_TAGS = {
 const STATUS_LABEL = { active: '育成中', done: '終了', dead: '枯死' };
 
 async function reloadMasters() {
-  [M.seasons, M.crops, M.varieties, M.locations, M.plantings] = await Promise.all(
-    ['seasons', 'crops', 'varieties', 'locations', 'plantings'].map(dbAll));
+  const stores = ['seasons', 'crops', 'varieties', 'locations', 'plantings'];
+  const data = await Promise.all(stores.map(dbAll));
+  stores.forEach((s, i) => { M[s] = data[i].filter(r => !r.deleted); });
+}
+
+/* ユーザーデータの保存はすべてここを通す（updatedAt付与+同期対象マーク） */
+async function putUserData(store, obj) {
+  obj.updatedAt = now();
+  obj.dirty = 1;
+  await dbPut(store, obj);
+  scheduleAutoSync();
+  return obj;
 }
 const varietyOf = (p) => M.varieties.find(v => v.id === p.varietyId);
 const cropOfVariety = (v) => v && M.crops.find(c => c.id === v.cropId);
@@ -202,7 +267,7 @@ document.getElementById('nav').addEventListener('click', (e) => {
 
 /* ================= home ================= */
 async function renderHome() {
-  const records = await dbAll('records');
+  const records = (await dbAll('records')).filter(r => !r.deleted);
   records.sort((a, b) => b.recordedAt.localeCompare(a.recordedAt));
   const todayStr = new Date().toDateString();
   const todayRecs = records.filter(r => new Date(r.recordedAt).toDateString() === todayStr);
@@ -442,11 +507,10 @@ async function saveRecord() {
     body: document.getElementById('memo').value.trim(),
     tags: [...inputState.tags],
     metrics,
-    updatedAt: now(),
   };
-  await dbPut('records', rec);
+  await putUserData('records', rec);
   for (const p of inputState.photos) {
-    await dbPut('photos', {
+    await putUserData('photos', {
       id: uid(), recordId: rec.id, blob: p.blob,
       takenAt: recordedAt, width: p.width, height: p.height,
     });
@@ -559,9 +623,8 @@ function openPlantingForm(existing) {
       transplantedOn: document.getElementById('pf-trans').value || null,
       status: existing ? document.getElementById('pf-status').value : 'active',
       supportId: p.supportId || null,
-      updatedAt: now(),
     };
-    await dbPut('plantings', obj);
+    await putUserData('plantings', obj);
     closeOverlay();
     toast('保存しました');
     render();
@@ -573,12 +636,10 @@ async function renderDetail(id) {
   const p = plantingById(id);
   if (!p) { navigate('list'); return; }
   const v = varietyOf(p), c = cropOfVariety(v), l = locationOf(p);
-  const records = await dbByIndex('records', 'plantingId', id);
+  const records = (await dbByIndex('records', 'plantingId', id)).filter(r => !r.deleted);
   records.sort((a, b) => b.recordedAt.localeCompare(a.recordedAt));
-  const allPhotos = [];
   for (const r of records) {
-    r._photos = await dbByIndex('photos', 'recordId', r.id);
-    allPhotos.push(...r._photos);
+    r._photos = (await dbByIndex('photos', 'recordId', r.id)).filter(p => !p.deleted && p.blob);
   }
   const totalW = records.reduce((s, r) => s + ((r.metrics || {}).weightG || 0), 0);
   const totalC = records.reduce((s, r) => s + ((r.metrics || {}).count || 0), 0);
@@ -642,8 +703,9 @@ async function renderDetail(id) {
   document.querySelectorAll('.rec-del').forEach(b => b.onclick = async () => {
     if (!confirm('この記録を削除しますか？')) return;
     const photos = await dbByIndex('photos', 'recordId', b.dataset.id);
-    for (const ph of photos) await dbDel('photos', ph.id);
-    await dbDel('records', b.dataset.id);
+    for (const ph of photos) await putUserData('photos', { ...ph, blob: null, deleted: 1 });
+    const rec = await dbGet('records', b.dataset.id);
+    if (rec) await putUserData('records', { ...rec, deleted: 1 });
     toast('削除しました');
     renderDetail(id);
   });
@@ -666,15 +728,50 @@ async function renderSettings() {
     `${esc(l.name)}${l.orientation ? ` <span class="sub">${esc(l.orientation)}向き</span>` : ''}${l.sunHours ? ` <span class="sub">日照${l.sunHours}h</span>` : ''}`));
   html += masterSection('シーズン', 'seasons', M.seasons.map(s => `${esc(s.name)} <span class="sub">${s.startDate || ''}〜${s.endDate || ''}</span>`));
 
+  const syncCfg = await getSyncCfg();
+  const dirtyN = await countDirty();
+  const syncStatus = !syncCfg.url
+    ? '未設定（下のURLとトークンを入力してください）'
+    : (syncCfg.lastSyncedAt
+      ? `最終同期: ${fmtDateFull(syncCfg.lastSyncedAt)} ${fmtTime(syncCfg.lastSyncedAt)}`
+      : 'まだ同期していません');
+  html += `<h2>同期（Googleドライブ）</h2><div class="card">
+    <div class="sub">${syncStatus}${dirtyN ? `　/ 未送信 ${dirtyN}件` : ''}</div>
+    <label class="field">GASウェブアプリURL</label>
+    <input type="text" id="sync-url" value="${esc(syncCfg.url || '')}" placeholder="https://script.google.com/macros/s/…/exec">
+    <label class="field">トークン</label>
+    <input type="text" id="sync-token" value="${esc(syncCfg.token || '')}" placeholder="Code.gs の TOKEN と同じ文字列">
+    <div class="row" style="margin-top:12px;">
+      <button class="secondary" id="btn-sync-save">保存して接続テスト</button>
+      <button class="primary grow" id="btn-sync-now">今すぐ同期</button>
+    </div>
+  </div>`;
+
   html += `<h2>データ管理</h2><div class="card">
     <button class="secondary" id="btn-export" style="width:100%;margin-bottom:8px;">📤 バックアップを書き出す（JSON）</button>
     <button class="secondary" id="btn-import" style="width:100%;">📥 バックアップを読み込む</button>
     <input type="file" id="import-file" accept=".json,application/json" hidden>
-    <div class="sub" style="margin-top:8px;">書き出したファイルは Google ドライブ等に保存してください。読み込みは「新しい方を採用」でマージされます。</div>
+    <div class="sub" style="margin-top:8px;">同期設定済みなら通常は不要。読み込みは「新しい方を採用」でマージされます。</div>
   </div>`;
 
-  html += `<div class="sub center" style="margin-top:20px;">栽培記録 v1.0.0 (Phase 1)</div>`;
+  html += `<div class="sub center" style="margin-top:20px;">栽培記録 v1.1.0 (Phase 2)</div>`;
   app.innerHTML = html;
+
+  document.getElementById('btn-sync-save').onclick = async () => {
+    const cfg = await getSyncCfg();
+    cfg.url = document.getElementById('sync-url').value.trim();
+    cfg.token = document.getElementById('sync-token').value.trim();
+    await dbPut('settings', { key: 'sync', value: cfg });
+    if (!cfg.url || !cfg.token) { toast('URLとトークンを入力してください'); return; }
+    toast('接続テスト中…');
+    try {
+      const r = await gasPost(cfg, { action: 'ping' });
+      toast(r.ok ? '接続OK ✓ 「今すぐ同期」を押してください' : `接続NG: ${r.error || '不明なエラー'}`);
+    } catch (e) {
+      toast('接続できません（URLを確認してください）');
+    }
+  };
+  document.getElementById('btn-sync-now').onclick = () => doSync(false);
 
   bindMasterSection('crops', openCropForm);
   bindMasterSection('varieties', openVarietyForm);
@@ -714,7 +811,7 @@ function masterForm(title, fieldsHtml, onSave, existing, store) {
   if (existing) {
     document.getElementById('mf-del').onclick = async () => {
       if (!confirm('削除しますか？（この項目を使っている記録があると表示が壊れます）')) return;
-      await dbDel(store, existing.id);
+      await putUserData(store, { ...existing, deleted: 1 });
       closeOverlay(); toast('削除しました'); render();
     };
   }
@@ -729,7 +826,7 @@ function openCropForm(existing) {
     async () => {
       const name = document.getElementById('cf-name').value.trim();
       if (!name) { toast('作物名は必須です'); return; }
-      await dbPut('crops', { id: c.id || uid(), name, trackIndividually: document.getElementById('cf-track').checked });
+      await putUserData('crops', { id: c.id || uid(), name, trackIndividually: document.getElementById('cf-track').checked });
       closeOverlay(); toast('保存しました'); render();
     }, existing, 'crops');
 }
@@ -745,7 +842,7 @@ function openVarietyForm(existing) {
     async () => {
       const name = document.getElementById('vf-name').value.trim();
       if (!name) { toast('品種名は必須です'); return; }
-      await dbPut('varieties', {
+      await putUserData('varieties', {
         id: v.id || uid(), cropId: document.getElementById('vf-crop').value,
         name, source: document.getElementById('vf-source').value,
       });
@@ -766,7 +863,7 @@ function openLocationForm(existing) {
     async () => {
       const name = document.getElementById('lf-name').value.trim();
       if (!name) { toast('場所名は必須です'); return; }
-      await dbPut('locations', {
+      await putUserData('locations', {
         id: l.id || uid(), name,
         orientation: document.getElementById('lf-ori').value,
         sunHours: Number(document.getElementById('lf-sun').value) || null,
@@ -786,13 +883,134 @@ function openSeasonForm(existing) {
     async () => {
       const name = document.getElementById('sf-name').value.trim();
       if (!name) { toast('名前は必須です'); return; }
-      await dbPut('seasons', {
+      await putUserData('seasons', {
         id: s.id || uid(), name,
         startDate: document.getElementById('sf-start').value || null,
         endDate: document.getElementById('sf-end').value || null,
       });
       closeOverlay(); toast('保存しました'); render();
     }, existing, 'seasons');
+}
+
+/* ================= sync (GAS -> Sheets + Drive) ================= */
+const SYNC_STORES = ['seasons', 'crops', 'varieties', 'locations', 'plantings', 'records'];
+let syncing = false;
+let autoSyncTimer = null;
+
+function scheduleAutoSync() {
+  if (autoSyncTimer) clearTimeout(autoSyncTimer);
+  autoSyncTimer = setTimeout(() => { autoSyncTimer = null; doSync(true).catch(() => {}); }, 4000);
+}
+
+async function getSyncCfg() {
+  const row = await dbGet('settings', 'sync');
+  return (row && row.value) || {};
+}
+
+async function gasPost(cfg, payload) {
+  // Content-Type: text/plain にすることでCORSプリフライトを回避（GAS定番パターン）
+  const res = await fetch(cfg.url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+    body: JSON.stringify({ token: cfg.token, ...payload }),
+  });
+  return res.json();
+}
+
+function photoMetaToLocal(meta, blob) {
+  return {
+    id: meta.id, recordId: meta.recordId, takenAt: meta.takenAt,
+    width: meta.width, height: meta.height,
+    deleted: meta.deleted ? 1 : 0, updatedAt: meta.updatedAt, blob,
+  };
+}
+
+async function countDirty() {
+  let n = 0;
+  for (const store of [...SYNC_STORES, 'photos']) {
+    n += (await dbAll(store)).filter(r => r.dirty).length;
+  }
+  return n;
+}
+
+async function doSync(silent) {
+  if (syncing) return;
+  const cfg = await getSyncCfg();
+  if (!cfg.url || !cfg.token) { if (!silent) toast('同期が未設定です'); return; }
+  if (!navigator.onLine) { if (!silent) toast('オフラインです（復帰後に同期されます）'); return; }
+  syncing = true;
+  if (!silent) toast('同期中…');
+  try {
+    // push: dirtyな行だけ送る
+    const changes = {};
+    const pushed = [];
+    for (const store of SYNC_STORES) {
+      const rows = (await dbAll(store)).filter(r => r.dirty);
+      changes[store] = rows.map(r => { const o = { ...r }; delete o.dirty; return o; });
+      for (const r of rows) pushed.push([store, r.id, r.updatedAt]);
+    }
+    const photosPush = [];
+    for (const p of (await dbAll('photos')).filter(p => p.dirty)) {
+      photosPush.push({
+        id: p.id, recordId: p.recordId, takenAt: p.takenAt,
+        width: p.width, height: p.height,
+        deleted: p.deleted ? 1 : 0, updatedAt: p.updatedAt,
+        dataB64: p.blob && !p.deleted ? await blobToB64(p.blob) : null,
+      });
+      pushed.push(['photos', p.id, p.updatedAt]);
+    }
+
+    const data = await gasPost(cfg, { action: 'sync', sinceRev: cfg.lastRev || 0, changes, photos: photosPush });
+    if (!data.ok) throw new Error(data.error || 'sync failed');
+
+    // pull: サーバー側で新しい行をマージ（updatedAtが新しい方を採用）
+    for (const store of SYNC_STORES) {
+      for (const obj of data.changes[store] || []) {
+        const cur = await dbGet(store, obj.id);
+        if (!cur || (obj.updatedAt || '') > (cur.updatedAt || '')) await dbPut(store, obj);
+      }
+    }
+    // 写真メタのマージ + 不足バイナリの取得
+    const needFetch = [];
+    for (const meta of data.photoMeta || []) {
+      const cur = await dbGet('photos', meta.id);
+      if (!cur) {
+        if (meta.deleted) await dbPut('photos', photoMetaToLocal(meta, null));
+        else needFetch.push(meta);
+      } else if ((meta.updatedAt || '') > (cur.updatedAt || '')) {
+        await dbPut('photos', photoMetaToLocal(meta, meta.deleted ? null : cur.blob));
+      }
+    }
+    for (let i = 0; i < needFetch.length; i += 8) {
+      const chunk = needFetch.slice(i, i + 8);
+      const r2 = await gasPost(cfg, { action: 'getPhotos', ids: chunk.map(m => m.id) });
+      if (r2.ok) {
+        for (const ph of r2.photos) {
+          const meta = chunk.find(m => m.id === ph.id);
+          if (meta) await dbPut('photos', photoMetaToLocal(meta, b64ToBlob(ph.dataB64)));
+        }
+      }
+    }
+    // push済みの行のdirtyを外す（同期中に再編集された行は残す）
+    for (const [store, id, u] of pushed) {
+      const cur = await dbGet(store, id);
+      if (cur && cur.dirty && cur.updatedAt === u) {
+        const o = { ...cur }; delete o.dirty;
+        await dbPut(store, o);
+      }
+    }
+    cfg.lastRev = data.maxRev;
+    cfg.lastSyncedAt = now();
+    await dbPut('settings', { key: 'sync', value: cfg });
+    if (!silent) toast('同期しました ✓');
+    const v = currentRoute().view;
+    if (v !== 'input') render(); // 入力中の画面は壊さない
+  } catch (e) {
+    console.error('sync failed', e);
+    if (!silent) toast('同期に失敗しました');
+  } finally {
+    syncing = false;
+  }
 }
 
 /* ================= export / import ================= */
@@ -819,7 +1037,9 @@ async function exportData() {
   for (const p of photos) {
     photosOut.push({
       id: p.id, recordId: p.recordId, takenAt: p.takenAt,
-      width: p.width, height: p.height, dataB64: await blobToB64(p.blob),
+      width: p.width, height: p.height,
+      deleted: p.deleted ? 1 : 0, updatedAt: p.updatedAt || null,
+      dataB64: p.blob && !p.deleted ? await blobToB64(p.blob) : null,
     });
   }
   const data = {
@@ -853,7 +1073,9 @@ async function importData(file) {
       if (!existing) {
         await dbPut('photos', {
           id: p.id, recordId: p.recordId, takenAt: p.takenAt,
-          width: p.width, height: p.height, blob: b64ToBlob(p.dataB64),
+          width: p.width, height: p.height,
+          deleted: p.deleted ? 1 : 0, updatedAt: p.updatedAt || null,
+          blob: p.dataB64 ? b64ToBlob(p.dataB64) : null,
         });
         added++;
       }
@@ -883,4 +1105,6 @@ overlay.addEventListener('click', (e) => { if (e.target === overlay || e.target.
   if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
     navigator.serviceWorker.register('sw.js').catch(() => {});
   }
+  window.addEventListener('online', scheduleAutoSync);
+  doSync(true).catch(() => {});
 })();
