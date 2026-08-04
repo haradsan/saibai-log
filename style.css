@@ -182,6 +182,8 @@ textarea { min-height: 80px; resize: vertical; }
   position: fixed; inset: 0; z-index: 100; background: rgba(0,0,0,0.6);
   display: flex; align-items: center; justify-content: center; padding: 16px;
 }
+/* display:flex が hidden属性のUAスタイル(display:none)に勝ってしまうため明示する */
+#overlay[hidden] { display: none; }
 #overlay .sheet {
   background: var(--card); border-radius: 16px; padding: 18px;
   width: 100%; max-width: 480px; max-height: 85vh; overflow-y: auto;
