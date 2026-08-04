@@ -754,7 +754,7 @@ async function renderSettings() {
     <div class="sub" style="margin-top:8px;">同期設定済みなら通常は不要。読み込みは「新しい方を採用」でマージされます。</div>
   </div>`;
 
-  html += `<div class="sub center" style="margin-top:20px;">栽培記録 v1.1.0 (Phase 2)</div>`;
+  html += `<div class="sub center" style="margin-top:20px;">栽培記録 v1.1.1 (Phase 2)</div>`;
   app.innerHTML = html;
 
   document.getElementById('btn-sync-save').onclick = async () => {
@@ -1090,11 +1090,14 @@ async function importData(file) {
 
 /* ================= overlay ================= */
 const overlay = document.getElementById('overlay');
+// CSSキャッシュが古くても幕が残らないよう、表示制御はインラインstyleで確定させる
+overlay.style.display = 'none';
 function openOverlay(html, bare) {
   overlay.innerHTML = bare ? html : `<div class="sheet">${html}</div>`;
   overlay.hidden = false;
+  overlay.style.display = 'flex';
 }
-function closeOverlay() { overlay.hidden = true; overlay.innerHTML = ''; }
+function closeOverlay() { overlay.hidden = true; overlay.style.display = 'none'; overlay.innerHTML = ''; }
 overlay.addEventListener('click', (e) => { if (e.target === overlay || e.target.classList.contains('full')) closeOverlay(); });
 
 /* ================= boot ================= */
