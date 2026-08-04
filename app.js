@@ -133,9 +133,9 @@ const M = { seasons: [], crops: [], varieties: [], locations: [], plantings: [] 
 const REC_TYPES = ['観察', '作業', '収穫', '失敗', '施肥', '環境'];
 const PRESET_TAGS = {
   '観察': ['開花', '着果', '発芽', '色づき', '脇芽'],
-  '作業': ['芽かき', '誘引', '摘心', '挿し芽', '定植', 'ずりおろし', '水替え'],
+  '作業': ['芽かき', '誘引', '摘心', '挿し芽', '定植', 'ずりおろし', '水替え', '防除'],
   '収穫': ['初収穫'],
-  '失敗': ['裂果', '病気', '虫害', '尻腐れ', '水切れ', '徒長', '枯れ'],
+  '失敗': ['サビダニ', 'ハダニ', '裂果', '病気', '虫害', '尻腐れ', '水切れ', '徒長', '枯れ'],
   '施肥': ['液肥', '追肥', 'EC調整'],
   '環境': ['猛暑', '長雨', '強風', '低温'],
 };
@@ -156,6 +156,7 @@ async function putUserData(store, obj) {
   return obj;
 }
 const varietyOf = (p) => M.varieties.find(v => v.id === p.varietyId);
+const plName = (p) => (p.mark ? p.mark + ' ' : '') + p.label;
 const cropOfVariety = (v) => v && M.crops.find(c => c.id === v.cropId);
 const locationOf = (p) => M.locations.find(l => l.id === p.locationId);
 const plantingById = (id) => M.plantings.find(p => p.id === id);
@@ -301,7 +302,7 @@ function recCard(r) {
   return `<div class="card rec-card" data-id="${r.id}" data-pid="${r.plantingId}">
     <div class="row">
       <span class="badge ${r.type}">${r.type}</span>
-      <span class="grow" style="font-size:0.85rem;font-weight:700;">${esc(p ? p.label : '?')}</span>
+      <span class="grow" style="font-size:0.85rem;font-weight:700;">${esc(p ? plName(p) : '?')}</span>
       <span class="sub">${fmtDate(r.recordedAt)} ${fmtTime(r.recordedAt)}</span>
     </div>
     ${r.body ? `<div style="margin-top:6px;font-size:0.9rem;">${esc(r.body)}</div>` : ''}
@@ -332,7 +333,7 @@ function plCard(p) {
   const days = daysFromSowing(p);
   return `<div class="card pl-card tappable" data-id="${p.id}">
     <span class="pl-status ${p.status}">${STATUS_LABEL[p.status] || p.status}</span>
-    <div class="label">${esc(p.label)}</div>
+    <div class="label">${esc(plName(p))}</div>
     <div class="meta">${esc(c ? c.name : '')} / ${esc(v ? v.name : '')}　📍${esc(l ? l.name : '')}${days !== null ? `　播種から${days}日` : ''}</div>
   </div>`;
 }
@@ -344,6 +345,7 @@ function bindPlCards() {
 
 /* ================= quick input ================= */
 const inputState = { photos: [], plantingId: null, type: '観察', tags: new Set(), weightG: 0, count: 0 };
+let tagHistory = {}; // type -> {tag: 使用回数}。過去の記録から学習した自作タグを候補表示する
 
 async function renderInput() {
   const recent = await plantingsByRecentUse();
@@ -357,6 +359,16 @@ async function renderInput() {
     document.getElementById('btn-goto-add').onclick = () => openPlantingForm();
     return;
   }
+  // 過去の記録から自作タグを収集（種別ごと・使用回数順）
+  tagHistory = {};
+  for (const r of await dbAll('records')) {
+    if (r.deleted) continue;
+    for (const t of r.tags || []) {
+      const m = tagHistory[r.type] = tagHistory[r.type] || {};
+      m[t] = (m[t] || 0) + 1;
+    }
+  }
+
   // reset state
   inputState.photos = [];
   inputState.plantingId = inputPrefill || recent[0].id;
@@ -372,7 +384,7 @@ async function renderInput() {
 
   html += `<label class="field">栽培単位</label><div class="chips" id="pl-chips">`;
   for (const p of recent) {
-    html += `<span class="chip${p.id === inputState.plantingId ? ' selected' : ''}" data-id="${p.id}">${esc(p.label)}</span>`;
+    html += `<span class="chip${p.id === inputState.plantingId ? ' selected' : ''}" data-id="${p.id}">${esc(plName(p))}</span>`;
   }
   html += `</div>`;
 
@@ -399,7 +411,11 @@ async function renderInput() {
     </div>
   </div>`;
 
-  html += `<label class="field">タグ</label><div class="chips" id="tag-chips"></div>`;
+  html += `<label class="field">タグ</label><div class="chips" id="tag-chips"></div>
+    <div class="row" style="margin-top:4px;">
+      <input type="text" id="new-tag" placeholder="新しいタグを追加（例: サビダニ）" class="grow">
+      <button class="secondary" id="btn-add-tag">追加</button>
+    </div>`;
   html += `<label class="field">メモ（任意）</label><textarea id="memo" placeholder="気づいたことをメモ"></textarea>`;
   html += `<label class="field">日時（変更する場合のみ）</label><input type="datetime-local" id="rec-dt">`;
   html += `<div style="margin-top:16px;"><button class="primary" id="btn-save">保存する</button></div>`;
@@ -449,6 +465,14 @@ async function renderInput() {
   bindStepper('count-stepper', 'count', 'count-val', '個');
 
   renderTagChips();
+  document.getElementById('btn-add-tag').onclick = () => {
+    const el = document.getElementById('new-tag');
+    const t = el.value.trim();
+    if (!t) return;
+    inputState.tags.add(t);
+    el.value = '';
+    renderTagChips();
+  };
 
   document.getElementById('btn-save').onclick = saveRecord;
 }
@@ -467,8 +491,12 @@ function bindStepper(stepperId, key, valId, unit) {
 function renderTagChips() {
   const el = document.getElementById('tag-chips');
   const presets = PRESET_TAGS[inputState.type] || [];
-  el.innerHTML = presets.map(t =>
-    `<span class="chip small${inputState.tags.has(t) ? ' selected' : ''}" data-tag="${t}">${t}</span>`).join('');
+  const learned = Object.entries(tagHistory[inputState.type] || {})
+    .sort((a, b) => b[1] - a[1]).map(([t]) => t)
+    .filter(t => !presets.includes(t));
+  const extra = [...inputState.tags].filter(t => !presets.includes(t) && !learned.includes(t));
+  el.innerHTML = [...presets, ...learned, ...extra].map(t =>
+    `<span class="chip small${inputState.tags.has(t) ? ' selected' : ''}" data-tag="${esc(t)}">${esc(t)}</span>`).join('');
   el.onclick = (e) => {
     const chip = e.target.closest('.chip');
     if (!chip) return;
@@ -583,6 +611,10 @@ function openPlantingForm(existing) {
     <label class="field">場所</label>
     <select id="pf-loc">${M.locations.map(l =>
       `<option value="${l.id}"${l.id === p.locationId ? ' selected' : ''}>${esc(l.name)}</option>`).join('')}</select>
+    <label class="field">目印（任意・名前の先頭に表示。a/b や 🔴 など）</label>
+    <div class="chips" id="pf-marks">${['🔴', '🟠', '🟡', '🟢', '🔵', '🟣', 'a', 'b', 'c', 'd', 'e'].map(m =>
+      `<span class="chip small" data-m="${m}">${m}</span>`).join('')}</div>
+    <input type="text" id="pf-mark" value="${esc(p.mark || '')}" maxlength="4" placeholder="自由入力も可（4文字まで）">
     <label class="field">ラベル（空欄なら自動生成）</label>
     <input type="text" id="pf-label" value="${esc(p.label || '')}" placeholder="例: ピンキー engawa 3株目">
     <label class="field">播種日</label>
@@ -591,7 +623,7 @@ function openPlantingForm(existing) {
     <input type="date" id="pf-trans" value="${p.transplantedOn || ''}">
     <label class="field">親株（挿し芽の場合・任意）</label>
     <select id="pf-parent"><option value="">なし</option>${M.plantings.filter(x => x.id !== p.id).map(x =>
-      `<option value="${x.id}"${x.id === p.parentPlantingId ? ' selected' : ''}>${esc(x.label)}</option>`).join('')}</select>
+      `<option value="${x.id}"${x.id === p.parentPlantingId ? ' selected' : ''}>${esc(plName(x))}</option>`).join('')}</select>
     ${existing ? `<label class="field">状態</label>
     <select id="pf-status">${Object.entries(STATUS_LABEL).map(([k, l]) =>
       `<option value="${k}"${k === p.status ? ' selected' : ''}>${l}</option>`).join('')}</select>` : ''}
@@ -601,6 +633,10 @@ function openPlantingForm(existing) {
     </div>`;
   openOverlay(sheet);
 
+  document.getElementById('pf-marks').onclick = (e) => {
+    const chip = e.target.closest('.chip');
+    if (chip) document.getElementById('pf-mark').value = chip.dataset.m;
+  };
   document.getElementById('pf-cancel').onclick = closeOverlay;
   document.getElementById('pf-save').onclick = async () => {
     const varietyId = document.getElementById('pf-variety').value;
@@ -618,6 +654,7 @@ function openPlantingForm(existing) {
       id: p.id || uid(),
       seasonId: p.seasonId || (settings ? settings.value : (M.seasons[0] && M.seasons[0].id)),
       varietyId, locationId, label,
+      mark: document.getElementById('pf-mark').value.trim(),
       parentPlantingId: document.getElementById('pf-parent').value || null,
       sownOn: document.getElementById('pf-sown').value || null,
       transplantedOn: document.getElementById('pf-trans').value || null,
@@ -632,30 +669,39 @@ function openPlantingForm(existing) {
 }
 
 /* ================= detail ================= */
-async function renderDetail(id) {
+async function renderDetail(id, tagFilter) {
   const p = plantingById(id);
   if (!p) { navigate('list'); return; }
   const v = varietyOf(p), c = cropOfVariety(v), l = locationOf(p);
-  const records = (await dbByIndex('records', 'plantingId', id)).filter(r => !r.deleted);
-  records.sort((a, b) => b.recordedAt.localeCompare(a.recordedAt));
+  const allRecords = (await dbByIndex('records', 'plantingId', id)).filter(r => !r.deleted);
+  allRecords.sort((a, b) => b.recordedAt.localeCompare(a.recordedAt));
+  const records = tagFilter ? allRecords.filter(r => (r.tags || []).includes(tagFilter)) : allRecords;
   for (const r of records) {
     r._photos = (await dbByIndex('photos', 'recordId', r.id)).filter(p => !p.deleted && p.blob);
   }
-  const totalW = records.reduce((s, r) => s + ((r.metrics || {}).weightG || 0), 0);
-  const totalC = records.reduce((s, r) => s + ((r.metrics || {}).count || 0), 0);
+  const totalW = allRecords.reduce((s, r) => s + ((r.metrics || {}).weightG || 0), 0);
+  const totalC = allRecords.reduce((s, r) => s + ((r.metrics || {}).count || 0), 0);
   const days = daysFromSowing(p);
 
   let html = `<button class="back-btn" id="btn-back">← 戻る</button>`;
   html += `<div class="detail-head">
     <span class="pl-status ${p.status}">${STATUS_LABEL[p.status]}</span>
-    <div class="label">${esc(p.label)}</div>
+    <div class="label">${esc(plName(p))}</div>
     <div class="sub" style="margin-top:4px;">
       ${esc(c ? c.name : '')} / ${esc(v ? v.name : '')}　📍${esc(l ? l.name : '')}<br>
       ${p.sownOn ? `播種 ${p.sownOn}（${days}日目）` : '播種日未設定'}
       ${p.transplantedOn ? `　定植 ${p.transplantedOn}` : ''}
-      ${p.parentPlantingId ? `　親株: ${esc((plantingById(p.parentPlantingId) || {}).label || '?')}` : ''}
+      ${p.parentPlantingId ? `　親株: ${esc(plName(plantingById(p.parentPlantingId) || { label: '?' }))}` : ''}
     </div>
   </div>`;
+
+  if (tagFilter) {
+    html += `<div class="card" style="background:var(--green-light);border-color:var(--green);">
+      <div class="row"><span class="grow" style="font-size:0.9rem;font-weight:700;">🏷 タグ「${esc(tagFilter)}」の記録だけ表示中（${records.length}件）</span>
+      <button class="secondary" id="clear-tagf" style="padding:6px 12px;">解除</button></div>
+      <div class="sub" style="margin-top:4px;">対処→経過→結果の流れを時系列で確認できます</div>
+    </div>`;
+  }
 
   if (totalW || totalC) {
     html += `<div class="harvest-sum">
@@ -670,7 +716,7 @@ async function renderDetail(id) {
   </div>`;
 
   if (records.length === 0) {
-    html += `<div class="empty">まだ記録がありません</div>`;
+    html += `<div class="empty">${tagFilter ? 'このタグの記録はありません' : 'まだ記録がありません'}</div>`;
   } else {
     let lastDate = '';
     for (const r of records) {
@@ -697,7 +743,13 @@ async function renderDetail(id) {
   }
   app.innerHTML = html;
 
-  document.getElementById('btn-back').onclick = () => history.back();
+  document.getElementById('btn-back').onclick = () => { if (tagFilter) renderDetail(id); else history.back(); };
+  const clearBtn = document.getElementById('clear-tagf');
+  if (clearBtn) clearBtn.onclick = () => renderDetail(id);
+  document.querySelectorAll('.tl-body .tag').forEach(t => {
+    t.style.cursor = 'pointer';
+    t.onclick = () => renderDetail(id, t.textContent);
+  });
   document.getElementById('btn-add-rec').onclick = () => { inputPrefill = id; navigate('input'); };
   document.getElementById('btn-edit-pl').onclick = () => openPlantingForm(p);
   document.querySelectorAll('.rec-del').forEach(b => b.onclick = async () => {
@@ -754,7 +806,7 @@ async function renderSettings() {
     <div class="sub" style="margin-top:8px;">同期設定済みなら通常は不要。読み込みは「新しい方を採用」でマージされます。</div>
   </div>`;
 
-  html += `<div class="sub center" style="margin-top:20px;">栽培記録 v1.1.1 (Phase 2)</div>`;
+  html += `<div class="sub center" style="margin-top:20px;">栽培記録 v1.2.0 (Phase 2)</div>`;
   app.innerHTML = html;
 
   document.getElementById('btn-sync-save').onclick = async () => {
