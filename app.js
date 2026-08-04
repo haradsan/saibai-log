@@ -133,7 +133,7 @@ const M = { seasons: [], crops: [], varieties: [], locations: [], plantings: [] 
 const REC_TYPES = ['観察', '作業', '収穫', '失敗', '施肥', '環境'];
 const PRESET_TAGS = {
   '観察': ['開花', '着果', '発芽', '色づき', '脇芽'],
-  '作業': ['芽かき', '誘引', '摘心', '挿し芽', '定植', 'ずりおろし', '水替え', '防除'],
+  '作業': ['芽かき', '誘引', '摘心', '挿し芽', '定植', 'ずりおろし', '水替え', '防除', '液肥切替'],
   '収穫': ['初収穫'],
   '失敗': ['サビダニ', 'ハダニ', '裂果', '病気', '虫害', '尻腐れ', '水切れ', '徒長', '枯れ'],
   '施肥': ['液肥', '追肥', 'EC調整'],
@@ -315,7 +315,13 @@ function metricsLine(r) {
   const parts = [];
   if (m.weightG) parts.push(`${m.weightG}g`);
   if (m.count) parts.push(`${m.count}個`);
-  return parts.length ? `<div class="metrics-line">🍅 ${parts.join(' / ')}</div>` : '';
+  if (m.brix) parts.push(`糖度${m.brix}`);
+  if (m.taste) parts.push(`食味${'★'.repeat(m.taste)}`);
+  if (m.tempC != null) parts.push(`気温${m.tempC}℃`);
+  if (m.waterC != null) parts.push(`水温${m.waterC}℃`);
+  if (!parts.length) return '';
+  const icon = (m.tempC != null || m.waterC != null) ? '🌡' : '🍅';
+  return `<div class="metrics-line">${icon} ${parts.join(' / ')}</div>`;
 }
 function tagsLine(r) {
   if (!r.tags || !r.tags.length) return '';
@@ -344,7 +350,7 @@ function bindPlCards() {
 }
 
 /* ================= quick input ================= */
-const inputState = { photos: [], plantingId: null, type: '観察', tags: new Set(), weightG: 0, count: 0 };
+const inputState = { photos: [], plantingId: null, type: '観察', tags: new Set(), weightG: 0, count: 0, taste: 0 };
 let tagHistory = {}; // type -> {tag: 使用回数}。過去の記録から学習した自作タグを候補表示する
 
 async function renderInput() {
@@ -376,6 +382,7 @@ async function renderInput() {
   inputState.tags = new Set();
   inputState.weightG = 0;
   inputState.count = 0;
+  inputState.taste = 0;
 
   let html = `<h1>記録する</h1>`;
   html += `<input type="file" id="photo-input" accept="image/*" capture="environment" multiple hidden>
@@ -409,6 +416,18 @@ async function renderInput() {
       <button data-add="10">+10</button><button data-add="-1">-1</button>
       <button data-add="0" id="count-clear">C</button>
     </div>
+    <label class="field">糖度（Brix・任意）</label>
+    <input type="number" id="m-brix" step="0.1" min="0" max="20" inputmode="decimal" placeholder="例: 8.5">
+    <label class="field">食味（任意）</label>
+    <div class="chips" id="taste-chips">${[1, 2, 3, 4, 5].map(n =>
+      `<span class="chip small" data-n="${n}">${'★'.repeat(n)}</span>`).join('')}</div>
+  </div>`;
+
+  html += `<div id="env-panel" style="display:none;">
+    <label class="field">気温（℃・任意）</label>
+    <input type="number" id="m-temp" step="0.5" inputmode="decimal" placeholder="例: 34">
+    <label class="field">水温・培養液温（℃・任意）</label>
+    <input type="number" id="m-water" step="0.5" inputmode="decimal" placeholder="例: 28">
   </div>`;
 
   html += `<label class="field">タグ</label><div class="chips" id="tag-chips"></div>
@@ -457,7 +476,18 @@ async function renderInput() {
     inputState.tags = new Set();
     document.querySelectorAll('#type-chips .chip').forEach(c => c.classList.toggle('selected', c === chip));
     document.getElementById('harvest-panel').style.display = inputState.type === '収穫' ? '' : 'none';
+    document.getElementById('env-panel').style.display = inputState.type === '環境' ? '' : 'none';
     renderTagChips();
+  };
+
+  // 食味の星（同じ星をもう一度タップで解除）
+  document.getElementById('taste-chips').onclick = (e) => {
+    const chip = e.target.closest('.chip');
+    if (!chip) return;
+    const n = Number(chip.dataset.n);
+    inputState.taste = inputState.taste === n ? 0 : n;
+    document.querySelectorAll('#taste-chips .chip').forEach(c =>
+      c.classList.toggle('selected', Number(c.dataset.n) === inputState.taste));
   };
 
   // steppers
@@ -526,6 +556,15 @@ async function saveRecord() {
   if (inputState.type === '収穫') {
     if (inputState.weightG > 0) metrics.weightG = inputState.weightG;
     if (inputState.count > 0) metrics.count = inputState.count;
+    const brix = parseFloat(document.getElementById('m-brix').value);
+    if (brix > 0) metrics.brix = brix;
+    if (inputState.taste > 0) metrics.taste = inputState.taste;
+  }
+  if (inputState.type === '環境') {
+    const t = parseFloat(document.getElementById('m-temp').value);
+    const w = parseFloat(document.getElementById('m-water').value);
+    if (!isNaN(t)) metrics.tempC = t;
+    if (!isNaN(w)) metrics.waterC = w;
   }
   const rec = {
     id: uid(),
@@ -621,6 +660,20 @@ function openPlantingForm(existing) {
     <input type="date" id="pf-sown" value="${p.sownOn || ''}">
     <label class="field">定植日（任意）</label>
     <input type="date" id="pf-trans" value="${p.transplantedOn || ''}">
+    <label class="field">容器</label>
+    <div class="chips" id="pf-containers">${['バケツ', 'プランター', '発泡箱', 'ペットボトル', '鉢'].map(m =>
+      `<span class="chip small" data-m="${m}">${m}</span>`).join('')}</div>
+    <input type="text" id="pf-container" value="${esc(p.container || '')}" placeholder="例: バケツ12L">
+    <label class="field">液肥（銘柄）</label>
+    <input type="text" id="pf-nutrient" list="nutrient-list" value="${esc(p.nutrient || '')}" placeholder="例: ハイポニカ">
+    <datalist id="nutrient-list">${[...new Set(['ハイポニカ', '微粉ハイポネックス', 'OATハウス',
+      ...M.plantings.map(x => x.nutrient).filter(Boolean)])].map(n => `<option value="${esc(n)}">`).join('')}</datalist>
+    <label class="field">通気</label>
+    <select id="pf-aeration">${['', 'エアポンプ', '水中ポンプ', 'なし（パッシブ）', 'その他'].map(o =>
+      `<option value="${o}"${o === (p.aeration || '') ? ' selected' : ''}>${o || '未設定'}</option>`).join('')}</select>
+    <label class="field">仕立て方</label>
+    <select id="pf-training">${['', '一本仕立て', '二本仕立て', '多本仕立て', '放任', '行灯仕立て'].map(o =>
+      `<option value="${o}"${o === (p.training || '') ? ' selected' : ''}>${o || '未設定'}</option>`).join('')}</select>
     <label class="field">親株（挿し芽の場合・任意）</label>
     <select id="pf-parent"><option value="">なし</option>${M.plantings.filter(x => x.id !== p.id).map(x =>
       `<option value="${x.id}"${x.id === p.parentPlantingId ? ' selected' : ''}>${esc(plName(x))}</option>`).join('')}</select>
@@ -636,6 +689,10 @@ function openPlantingForm(existing) {
   document.getElementById('pf-marks').onclick = (e) => {
     const chip = e.target.closest('.chip');
     if (chip) document.getElementById('pf-mark').value = chip.dataset.m;
+  };
+  document.getElementById('pf-containers').onclick = (e) => {
+    const chip = e.target.closest('.chip');
+    if (chip) document.getElementById('pf-container').value = chip.dataset.m;
   };
   document.getElementById('pf-cancel').onclick = closeOverlay;
   document.getElementById('pf-save').onclick = async () => {
@@ -655,6 +712,10 @@ function openPlantingForm(existing) {
       seasonId: p.seasonId || (settings ? settings.value : (M.seasons[0] && M.seasons[0].id)),
       varietyId, locationId, label,
       mark: document.getElementById('pf-mark').value.trim(),
+      container: document.getElementById('pf-container').value.trim(),
+      nutrient: document.getElementById('pf-nutrient').value.trim(),
+      aeration: document.getElementById('pf-aeration').value,
+      training: document.getElementById('pf-training').value,
       parentPlantingId: document.getElementById('pf-parent').value || null,
       sownOn: document.getElementById('pf-sown').value || null,
       transplantedOn: document.getElementById('pf-trans').value || null,
@@ -692,6 +753,15 @@ async function renderDetail(id, tagFilter) {
       ${p.sownOn ? `播種 ${p.sownOn}（${days}日目）` : '播種日未設定'}
       ${p.transplantedOn ? `　定植 ${p.transplantedOn}` : ''}
       ${p.parentPlantingId ? `　親株: ${esc(plName(plantingById(p.parentPlantingId) || { label: '?' }))}` : ''}
+      ${(() => {
+        const setup = [
+          p.container && `🪣 ${esc(p.container)}`,
+          p.nutrient && `💧 ${esc(p.nutrient)}`,
+          p.aeration && `🫧 ${esc(p.aeration)}`,
+          p.training && `🌿 ${esc(p.training)}`,
+        ].filter(Boolean).join('　');
+        return setup ? `<br>${setup}` : '';
+      })()}
     </div>
   </div>`;
 
@@ -806,7 +876,7 @@ async function renderSettings() {
     <div class="sub" style="margin-top:8px;">同期設定済みなら通常は不要。読み込みは「新しい方を採用」でマージされます。</div>
   </div>`;
 
-  html += `<div class="sub center" style="margin-top:20px;">栽培記録 v1.2.0 (Phase 2)</div>`;
+  html += `<div class="sub center" style="margin-top:20px;">栽培記録 v1.3.0 (Phase 2)</div>`;
   app.innerHTML = html;
 
   document.getElementById('btn-sync-save').onclick = async () => {

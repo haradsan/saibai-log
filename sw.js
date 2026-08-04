@@ -1,5 +1,5 @@
-const CACHE = 'saibai-v5';
-const ASSETS = ['./', './index.html', './style.css?v=1.2.0', './app.js?v=1.2.0', './manifest.webmanifest', './icon-192.png', './icon-512.png'];
+const CACHE = 'saibai-v6';
+const ASSETS = ['./', './index.html', './style.css?v=1.3.0', './app.js?v=1.3.0', './manifest.webmanifest', './icon-192.png', './icon-512.png'];
 
 self.addEventListener('install', (e) => {
   e.waitUntil(
